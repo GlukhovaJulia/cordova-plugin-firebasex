@@ -489,7 +489,10 @@ public class FirebasePlugin extends CordovaPlugin {
                     }catch (ApiException ae){
                         if(ae.getStatusCode() == 10){
                             throw new Exception("Unknown server client ID");
-                        }else{
+                        }else if (ae.getStatusCode() == 12501){
+                throw new Exception("SIGN_IN_CANCELLED");
+            }
+            else{
                             throw new Exception(CommonStatusCodes.getStatusCodeString(ae.getStatusCode()));
                         }
                     }
@@ -506,7 +509,9 @@ public class FirebasePlugin extends CordovaPlugin {
                     break;
             }
         } catch (Exception e) {
-            handleExceptionWithContext(e, FirebasePlugin.activityResultCallbackContext);
+        String msg = e.toString();
+        boolean sendToCrashlytics = msg != "SIGN_IN_CANCELLED" && msg != "INTERNAL_ERROR" && msg != "NETWORK_ERROR" && msg != "CANCELED";
+            handleExceptionWithContext(e, FirebasePlugin.activityResultCallbackContext, sendToCrashlytics);
         }
     }
 
@@ -1090,7 +1095,7 @@ public class FirebasePlugin extends CordovaPlugin {
         });
     }
 
-	private void setConfigSettings(final CallbackContext callbackContext, final JSONArray args) throws JSONException {
+    private void setConfigSettings(final CallbackContext callbackContext, final JSONArray args) throws JSONException {
         cordova.getThreadPool().execute(new Runnable() {
             public void run() {
                 try {
@@ -1186,24 +1191,32 @@ public class FirebasePlugin extends CordovaPlugin {
     public void signOutUser(final CallbackContext callbackContext, final JSONArray args){
         cordova.getThreadPool().execute(new Runnable() {
             public void run() {
-                try {
-                    if(!userNotSignedInError(callbackContext)) return;
+        Exception error = null;
 
-                    // Sign out of Firebase
-                    FirebaseAuth.getInstance().signOut();
+        try {
+            // Try to sign out of Google
+            GoogleSignInOptions gso = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN).build();
+            GoogleSignInClient mGoogleSignInClient = GoogleSignIn.getClient(cordovaActivity, gso);
+            handleTaskOutcome(mGoogleSignInClient.signOut(), callbackContext);
+        } catch(Exception googleSignOutException) {
+            error = googleSignOutException;
+        }
 
-                    // Try to sign out of Google
-                    try{
-                        GoogleSignInOptions gso = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN).build();
-                        GoogleSignInClient mGoogleSignInClient = GoogleSignIn.getClient(cordovaActivity, gso);
-                        handleTaskOutcome(mGoogleSignInClient.signOut(), callbackContext);
-                    }catch(Exception googleSignOutException){
-                        callbackContext.success();
-                    }
+        try {
+            // Sign out of Firebase
+            if(isUserSignedIn())
+                FirebaseAuth.getInstance().signOut();
+        } catch (Exception e) {
+            error = e;
+        }
 
-                } catch (Exception e) {
-                    handleExceptionWithContext(e, callbackContext);
-                }
+        if (error == null)
+        {
+            callbackContext.success();
+            return;
+        }
+
+        handleExceptionWithContext(error, callbackContext);
             }
         });
     }
@@ -2238,6 +2251,7 @@ public class FirebasePlugin extends CordovaPlugin {
         cordova.getThreadPool().execute(new Runnable() {
             public void run() {
                 try {
+            FirebasePlugin.activityResultCallbackContext = callbackContext;
                     String clientId = args.getString(0);
 
                     GoogleSignInOptions gso = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
@@ -2247,7 +2261,6 @@ public class FirebasePlugin extends CordovaPlugin {
 
                     GoogleSignInClient mGoogleSignInClient = GoogleSignIn.getClient(FirebasePlugin.instance.cordovaActivity, gso);
                     Intent signInIntent = mGoogleSignInClient.getSignInIntent();
-                    FirebasePlugin.activityResultCallbackContext = callbackContext;
                     FirebasePlugin.instance.cordovaInterface.startActivityForResult(FirebasePlugin.instance, signInIntent, GOOGLE_SIGN_IN);
                 } catch (Exception e) {
                     handleExceptionWithContext(e, callbackContext);
@@ -3479,6 +3492,17 @@ public class FirebasePlugin extends CordovaPlugin {
     /*
      * Helper methods
      */
+    // we do not need to send all "errors" to crashlytics. For example, when user cancels the login
+    protected static void handleExceptionWithContext(Exception e, CallbackContext context, boolean sendToCrashlytics) {
+        String msg = e.toString();
+        Log.e(TAG, msg);
+        if (instance != null && sendToCrashlytics) {
+            instance.logExceptionToCrashlytics(e);
+        }
+
+        context.error(msg);
+    }
+
     protected static void handleExceptionWithContext(Exception e, CallbackContext context) {
         String msg = e.toString();
         Log.e(TAG, msg);
@@ -3926,8 +3950,8 @@ public class FirebasePlugin extends CordovaPlugin {
             }
         }
     }
-	
-	private boolean isUserSignedIn(){
+
+    private boolean isUserSignedIn(){
         FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
         return user != null;
     }
